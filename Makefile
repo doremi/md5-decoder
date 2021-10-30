@@ -1,5 +1,6 @@
-CXX = nvcc
-CXX_FLAGS = -g -O3 -arch=sm_21
+PREFIX = /usr/local/cuda/bin
+CXX = $(PREFIX)/nvcc
+CXX_FLAGS = -g -O3
 CXX_LIBS = 
 BIN = md5_gpu
 
