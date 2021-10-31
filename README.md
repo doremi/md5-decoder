@@ -2,12 +2,13 @@
 * Really simple
 * Multi GPU support
 * Any length (currently 1-8)
-* Any charset (currently A-Za-z0-9)
+* Any bits (0~255)
 
 # Benchmarks
 * 1x GeForce GTX 660M  (w/  display attached) = **220 MHash/s**
 * 2x GeForce GTX 460   (w/o display attached) = **1.65 GHash/s**
 * 1x GeForce GTX Titan (w/  display attached) = **2.3 GHash/s**
+* 1x GeForce RTX 3080M (w/  display attached) = **13 GHash/s**
 
 # Compilation
 * make

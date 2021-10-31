@@ -153,9 +153,13 @@ int main(int argc, char* argv[]){
   /* Time */
   cudaEvent_t clockBegin;
   cudaEvent_t clockLast;
+  cudaEvent_t clockProgressBegin;
+  cudaEvent_t clockProgressLast;
 
   cudaEventCreate(&clockBegin);
   cudaEventCreate(&clockLast);
+  cudaEventCreate(&clockProgressBegin);
+  cudaEventCreate(&clockProgressLast);
   cudaEventRecord(clockBegin, 0);
 
   /* Current word is different on each device */
@@ -178,6 +182,7 @@ int main(int argc, char* argv[]){
   while(true){
     bool result = false;
 
+    cudaEventRecord(clockProgressBegin, 0);
     for(int device = 0; device < devices; device++){
       cudaSetDevice(device);
 
@@ -191,10 +196,15 @@ int main(int argc, char* argv[]){
       result = next(&g_wordLength, g_word, TOTAL_THREADS * HASHES_PER_KERNEL * TOTAL_BLOCKS);
     }
 
-    counter += TOTAL_THREADS * HASHES_PER_KERNEL * TOTAL_BLOCKS;
     /* Display progress */
+    float ms = 0;
+    counter += TOTAL_THREADS * HASHES_PER_KERNEL * TOTAL_BLOCKS;
+    cudaEventRecord(clockProgressLast, 0);
+    cudaEventSynchronize(clockProgressLast);
+    cudaEventElapsedTime(&ms, clockProgressBegin, clockProgressLast);
 
-    printf("\rNotice: currently counter %lu", counter);
+    printf("\rNotice: currently counter %lu, time: %f ms, speed: %u hash/ms",
+	   counter, ms, (unsigned int)((TOTAL_THREADS * HASHES_PER_KERNEL * TOTAL_BLOCKS) / ms));
     fflush(NULL);
 
     for(int device = 0; device < devices; device++){
@@ -248,4 +258,6 @@ int main(int argc, char* argv[]){
 
   cudaEventDestroy(clockBegin);
   cudaEventDestroy(clockLast);
+  cudaEventDestroy(clockProgressBegin);
+  cudaEventDestroy(clockProgressLast);
 }
