@@ -28,35 +28,33 @@
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
 #include <curand_kernel.h>
-#include <device_functions.h>
 
 #define CONST_WORD_LIMIT 10
 #define CONST_CHARSET_LIMIT 100
 
-#define CONST_CHARSET "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-#define CONST_CHARSET_LENGTH (sizeof(CONST_CHARSET) - 1)
+#define CONST_CHARSET_LENGTH 256
 
 #define CONST_WORD_LENGTH_MIN 1
 #define CONST_WORD_LENGTH_MAX 8
 
 #define TOTAL_BLOCKS 16384UL
 #define TOTAL_THREADS 512UL
-#define HASHES_PER_KERNEL 128UL
+#define HASHES_PER_KERNEL 256UL
 
 #include "assert.cu"
 #include "md5.cu"
+#include "md5_fake.cu"
 
 /* Global variables */
 uint8_t g_wordLength;
 
-char g_word[CONST_WORD_LIMIT];
-char g_charset[CONST_CHARSET_LIMIT];
-char g_cracked[CONST_WORD_LIMIT];
+uint8_t g_word[CONST_WORD_LIMIT];
+uint8_t g_cracked[CONST_WORD_LIMIT];
 
-__device__ char g_deviceCharset[CONST_CHARSET_LIMIT];
-__device__ char g_deviceCracked[CONST_WORD_LIMIT];
+__device__ uint8_t g_deviceCracked[CONST_WORD_LIMIT];
+__device__ uint8_t g_deviceFound[1];
 
-__device__ __host__ bool next(uint8_t* length, char* word, uint32_t increment){
+__device__ __host__ bool next(uint8_t* length, uint8_t* word, uint32_t increment){
   uint32_t idx = 0;
   uint32_t add = 0;
 
@@ -82,35 +80,29 @@ __device__ __host__ bool next(uint8_t* length, char* word, uint32_t increment){
   return true;
 }
 
-__global__ void md5Crack(uint8_t wordLength, char* charsetWord, uint32_t hash01, uint32_t hash02, uint32_t hash03, uint32_t hash04){
+__global__ void md5Crack(uint8_t wordLength, uint8_t* charsetWord, uint32_t hash01, uint32_t hash02, uint32_t hash03, uint32_t hash04){
   uint32_t idx = (blockIdx.x * blockDim.x + threadIdx.x) * HASHES_PER_KERNEL;
 
-  /* Shared variables */
-  __shared__ char sharedCharset[CONST_CHARSET_LIMIT];
-
   /* Thread variables */
-  char threadCharsetWord[CONST_WORD_LIMIT];
-  char threadTextWord[CONST_WORD_LIMIT];
+  uint8_t threadCharsetWord[CONST_WORD_LIMIT];
   uint8_t threadWordLength;
   uint32_t threadHash01, threadHash02, threadHash03, threadHash04;
 
   /* Copy everything to local memory */
   memcpy(threadCharsetWord, charsetWord, CONST_WORD_LIMIT);
   memcpy(&threadWordLength, &wordLength, sizeof(uint8_t));
-  memcpy(sharedCharset, g_deviceCharset, sizeof(uint8_t) * CONST_CHARSET_LIMIT);
 
   /* Increment current word by thread index */
   next(&threadWordLength, threadCharsetWord, idx);
 
   for(uint32_t hash = 0; hash < HASHES_PER_KERNEL; hash++){
-    for(uint32_t i = 0; i < threadWordLength; i++){
-      threadTextWord[i] = sharedCharset[threadCharsetWord[i]];
-    }
 
-    md5Hash((unsigned char*)threadTextWord, threadWordLength, &threadHash01, &threadHash02, &threadHash03, &threadHash04);   
+    md5Hash((uint8_t*)threadCharsetWord, threadWordLength, &threadHash01, &threadHash02, &threadHash03, &threadHash04);
 
     if(threadHash01 == hash01 && threadHash02 == hash02 && threadHash03 == hash03 && threadHash04 == hash04){
-      memcpy(g_deviceCracked, threadTextWord, threadWordLength);
+      memcpy(g_deviceCracked, threadCharsetWord, threadWordLength);
+      g_deviceFound[0] = 1;
+      break;
     }
 
     if(!next(&threadWordLength, threadCharsetWord, 1)){
@@ -151,7 +143,6 @@ int main(int argc, char* argv[]){
   /* Fill memory */
   memset(g_word, 0, CONST_WORD_LIMIT);
   memset(g_cracked, 0, CONST_WORD_LIMIT);
-  memcpy(g_charset, CONST_CHARSET, CONST_CHARSET_LENGTH);
 
   /* Current word length = minimum word length */
   g_wordLength = CONST_WORD_LENGTH_MIN;
@@ -168,14 +159,17 @@ int main(int argc, char* argv[]){
   cudaEventRecord(clockBegin, 0);
 
   /* Current word is different on each device */
-  char** words = new char*[devices];
+  uint8_t** words = new uint8_t*[devices];
+
+  uint8_t founds[1] = {0};
+  uint64_t counter = 0;
 
   for(int device = 0; device < devices; device++){
     cudaSetDevice(device);
 
     /* Copy to each device */
-    ERROR_CHECK(cudaMemcpyToSymbol(g_deviceCharset, g_charset, sizeof(uint8_t) * CONST_CHARSET_LIMIT, 0, cudaMemcpyHostToDevice));
     ERROR_CHECK(cudaMemcpyToSymbol(g_deviceCracked, g_cracked, sizeof(uint8_t) * CONST_WORD_LIMIT, 0, cudaMemcpyHostToDevice));
+    ERROR_CHECK(cudaMemcpyToSymbol(g_deviceFound, founds, sizeof(uint8_t), 0, cudaMemcpyHostToDevice));
 
     /* Allocate on each device */
     ERROR_CHECK(cudaMalloc((void**)&words[device], sizeof(uint8_t) * CONST_WORD_LIMIT));
@@ -183,7 +177,6 @@ int main(int argc, char* argv[]){
 
   while(true){
     bool result = false;
-    bool found = false;
 
     for(int device = 0; device < devices; device++){
       cudaSetDevice(device);
@@ -198,14 +191,11 @@ int main(int argc, char* argv[]){
       result = next(&g_wordLength, g_word, TOTAL_THREADS * HASHES_PER_KERNEL * TOTAL_BLOCKS);
     }
 
+    counter += TOTAL_THREADS * HASHES_PER_KERNEL * TOTAL_BLOCKS;
     /* Display progress */
-    char word[CONST_WORD_LIMIT];
 
-    for(int i = 0; i < g_wordLength; i++){
-      word[i] = g_charset[g_word[i]];
-    }
-
-    std::cout << "Notice: currently at " << std::string(word, g_wordLength) << " (" << (uint32_t)g_wordLength << ")" << std::endl;
+    printf("\rNotice: currently counter %lu", counter);
+    fflush(NULL);
 
     for(int device = 0; device < devices; device++){
       cudaSetDevice(device);
@@ -215,16 +205,19 @@ int main(int argc, char* argv[]){
 
       /* Copy result */
       ERROR_CHECK(cudaMemcpyFromSymbol(g_cracked, g_deviceCracked, sizeof(uint8_t) * CONST_WORD_LIMIT, 0, cudaMemcpyDeviceToHost)); 
+      ERROR_CHECK(cudaMemcpyFromSymbol(founds, g_deviceFound, sizeof(uint8_t), 0, cudaMemcpyDeviceToHost));
 
       /* Check result */
-      if(found = *g_cracked != 0){
+      if(founds[0] == 1){
+	std::cout << std::endl;
         std::cout << "Notice: cracked " << g_cracked << std::endl;
         break;
       }
     }
 
-    if(!result || found){
-      if(!result && !found){
+    if(!result || founds[0]){
+      if(!result && !founds[0]){
+	std::cout << std::endl;
         std::cout << "Notice: found nothing (host)" << std::endl;
       }
 
